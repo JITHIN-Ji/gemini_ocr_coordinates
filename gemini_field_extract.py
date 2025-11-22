@@ -31,44 +31,109 @@ def extract_names_from_image(image: Image.Image):
         
         # Prompt for extracting names from columns
         prompt = """
-        You are a document analysis expert. This image contains names organized in columns.
+       You are a document analysis expert. This image contains names organized in columns.
+
+YOUR TASK:
+1. Identify **all column headings** in the document. For each column heading, determine whether the column is a **name column**.
+   A column is a NAME COLUMN ONLY IF its heading contains one of the following keywords:
+       - "Christian Name"
+       - "Surname"
+       - "Names of Each Voter"
+       - "Full Name"
+       - "Name of Voter"
+       - "Name" (ONLY when used for persons, NOT properties)
+
+   EXPLICITLY **IGNORE** ANY COLUMN with headings such as:
+       - "Name of the Property"
+       - "Name of the Tenant"
+       - "Street"
+       - "Lane"
+       - "Place"
+       - "Property"
+       - "Farm"
+       - "House"
+       - "Occupier"
+       - "Where Property Is Situated"
+
+   **If the heading is not clearly a person-name column, DO NOT extract anything from that column.**
+2. **CRITICAL SURNAME RULE:**
+   - If a column heading indicates surname-first ordering — specifically when the heading contains the phrase:
+       "Name of Each Voter at Full Length the Surname Being First"
+     then:
+       * Return the **surname as given_name**
+       * Return the **given name as surname**
+   - In all other headings, use **normal order**:
+       * First word = given name
+       * Remaining words = surname
+
+
+3. Identify names that are **split across multiple lines** (e.g., "jit" on one line and "hin" on the next).
+4. For each complete name:
+    - Determine the **given name** and **surname** based on the column heading rule above.
+    - Split each part into individual words.
+    - **If a word is split across lines, keep the fragments as separate strings in the parts array.**
+    - Preserve original spelling and order.
+
+NAME EXTRACTION RULES:
+- **Normal case (no surname-first indicator in heading):** 
+  First word = given name; remaining words = surname.
+  Example:
+    "Walker Richard Zouche"
+        given_name: "Walker"
+        surname: "Richard Zouche"
         
-        YOUR TASK:
-        1. Identify ALL names in the document, reading from left to right, top to bottom
-        2. Each person's name may be in format like "Bayly Francis Wilson" or "Amal Krishna Rajesh"
-        3. For EACH complete name you find, split it into individual words
+- **Surname-first case (column heading indicates "surname being first" or similar):**
+  **SWAP THE VALUES:** Return surname as given_name, and given name as surname.
+  
+  Example 1:
+    Actual name in document: "Portal Robert" (where portal is given name, Robert is surname)
+    Return as:
+        given_name: "Robert"  
+        surname: "portal"  
+  
+  Example 2:
+    Actual name in document: "Walker Richard Zouche" (where Walker is given name, Richard Zouche is surname)
+    Return as:
+        given_name: "Richard Zouche"  
+        surname: "Walker"  
         
-        IMPORTANT RULES:
-        - A complete name consists of all words belonging to one person
-        - Split each complete name into separate individual words
-        - Preserve the exact spelling of each word
-        - Maintain the order of words as they appear
-        
-        OUTPUT FORMAT - Return ONLY this JSON:
+- **If a word is broken across lines, keep fragments separate:**
+    "jit" on line 1 + "hin" on line 2 → ["jit", "hin"]
+
+OUTPUT FORMAT — Return ONLY this JSON (NO markdown, NO explanation):
+{
+    "names": [
         {
-            "names": [
-                {
-                    "full_name": "Bayly Francis Wilson",
-                    "name_parts": ["Bayly", "Francis", "Wilson"]
-                },
-                {
-                    "full_name": "Amal Krishna Rajesh",
-                    "name_parts": ["Amal", "Krishna", "Rajesh"]
-                },
-                {
-                    "full_name": "Goodman Timothy",
-                    "name_parts": ["Goodman", "Timothy"]
-                }
-            ]
+            "full_name": "Amal Krishna Rajesh",
+            "given_name": "Amal",
+            "given_name_parts": ["Amal"],
+            "surname": "Krishna Rajesh",
+            "surname_parts": ["Krishna", "Rajesh"]
+        },
+        {
+            "full_name": "Jithin Rajesh",
+            "given_name": "Jithin",
+            "given_name_parts": ["jit", "hin"],
+            "surname": "Rajesh",
+            "surname_parts": ["Rajesh"]
+        },
+        {
+            "full_name": "Amal Krishna",
+            "given_name": "Amal",
+            "given_name_parts": ["Amal"],
+            "surname": "Krishna",
+            "surname_parts": ["Krishna"]
         }
-        
-        CRITICAL:
-        - full_name: The complete name as it appears (all words together)
-        - name_parts: Array of individual words from that name
-        - Include EVERY name you can see
-        - Each word in name_parts should be exactly as written in the document
-        - Return ONLY the JSON, no markdown, no explanation
-        """
+    ]
+}
+
+CRITICAL REQUIREMENTS:
+- Extract ONLY from name-related columns (e.g., "Christian Names", "Names of Each Voter", "Full Name", "Name") — ignore all other columns.
+- **If a word/name is split across lines, keep the fragments as separate strings in the parts array** (e.g., ["jit", "hin"]).
+- **CRITICAL:** If heading indicates "surname being first", SWAP the values - return surname as given_name and given name as surname.
+- Do NOT invent or assume names.
+- Preserve exact spelling from the document.
+- Maintain left-to-right, top-to-bottom extraction order"""
         
         # Generate response
         response = model.generate_content([prompt, image])
@@ -115,34 +180,59 @@ def extract_names_from_image(image: Image.Image):
 
 def prepare_gemini_output_for_matching(gemini_result):
     """
-    Convert Gemini result to format ready for coordinate matching.
-    Returns list with full_name and individual name_parts.
-    
-    Args:
-        gemini_result: Dict with 'names' list from Gemini
-        
+    Convert Gemini result (new format) to a structure ready for coordinate matching.
+
+    Expected Gemini format:
+    {
+        "names": [
+            {
+                "full_name": "Amal Krishna Rajesh",
+                "given_name": "Amal",
+                "given_name_parts": ["Amal"],
+                "surname": "Krishna Rajesh",
+                "surname_parts": ["Krishna", "Rajesh"]
+            }
+        ]
+    }
+
     Returns:
-        list: Names with parts ready for coordinate matching
+        list: Cleaned and standardized output list for matching.
     """
+
     formatted_output = []
-    
+
     if "names" in gemini_result:
         for idx, name_obj in enumerate(gemini_result["names"], 1):
+
             full_name = name_obj.get("full_name", "").strip()
-            name_parts = name_obj.get("name_parts", [])
-            
-            # Clean name parts
-            name_parts = [part.strip() for part in name_parts if part.strip()]
-            
-            if full_name and name_parts:
-                formatted_item = {
-                    "full_name": full_name,
-                    "name_parts": name_parts,
-                    "person_id": idx
-                }
-                formatted_output.append(formatted_item)
-                print(f"Prepared Person {idx}: {full_name} -> {name_parts}")
-    
+
+            given_name = name_obj.get("given_name", "").strip()
+            given_name_parts = [p.strip() for p in name_obj.get("given_name_parts", []) if p.strip()]
+
+            surname = name_obj.get("surname", "").strip()
+            surname_parts = [p.strip() for p in name_obj.get("surname_parts", []) if p.strip()]
+
+            # Validate that the record contains at least a full name
+            if not full_name:
+                print(f"Skipping Person {idx}: Missing full_name")
+                continue
+
+            formatted_item = {
+                "person_id": idx,
+                "full_name": full_name,
+                "given_name": given_name,
+                "given_name_parts": given_name_parts,
+                "surname": surname,
+                "surname_parts": surname_parts,
+            }
+
+            formatted_output.append(formatted_item)
+
+            print(
+                f"Prepared Person {idx}: Full='{full_name}', "
+                f"Given='{given_name_parts}', Surname='{surname_parts}'"
+            )
+
     print(f"\nTotal names prepared for matching: {len(formatted_output)}")
     return formatted_output
 
